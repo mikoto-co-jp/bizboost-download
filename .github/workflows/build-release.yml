@@ -1,0 +1,196 @@
+name: build-release
+# bluelamp-installer(private) の main から BizBoostSetup.exe をビルドし、
+# このリポジトリの Release として公開する。
+# 恒久URL: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.exe
+#
+# 【この workflow の出自】yamatovision/bluelamp-download の build-release.yml の写しである。
+# 1 コードベース 2 ブランド（板 #572）の配布側で、**新しい型を発明していない**。
+# BlueLamp 版との差分は 4 点だけ:
+#   1. ビルドが build/build.ps1 -Brand bizboost（installer 側 PR #30 で追加された引数）
+#   2. 成果物が Output/BizBoostSetup.exe（SHA256SUMS.txt の中身も同じ名前）
+#   3. jsign の --name が BizBoost、--url がこのリポジトリ
+#   4. Secret 事前検査（下記 preflight ジョブ）を足した
+# 変えていない: --keystore / --alias / --certfile / TSA / --alg。
+#   ⇒ **署名名義は MIKOTO, K.K. のまま**（主君裁定 2026-09-02。GI 名義証明書は取らない）。
+#      BizBoost の提供元表記（株式会社グローバルイノベーションズ）と署名者が異なるのは意図的。
+#
+# トリガー:
+#   - workflow_dispatch: 手動リリース（gh workflow run build-release -R mikoto-co-jp/bizboost-download）
+#   - schedule: 🚧 **意図的に無効化してある**（下の cron はコメントアウト）。Secret 投入と
+#     WIF の許可対象追加（README「実走前の宿題」）が済むまで、毎朝自動で赤くなるだけなので出さない。
+#     有効化は「手動 dispatch が 1 回グリーンになってから」= その 1 行を戻すだけ。
+# 認証: read-only deploy key（installer リポの閲覧のみ・Secret INSTALLER_DEPLOY_KEY）。PAT 不使用。
+# コード署名: GlobalSign OV コードサイニング証明書（CN=MIKOTO, K.K.）。秘密鍵は GCP Cloud KMS の
+#   HSM（FIPS 140-2 Level 3）内にあり、エクスポート不可。CI は Workload Identity 連携で署名だけを依頼する。
+#   必要な Secret: GCP_WORKLOAD_IDENTITY_PROVIDER / GCP_SIGNING_SERVICE_ACCOUNT（詳細は codesign/README.md）
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '17 21 * * *'   # 毎日 06:17 JST。Secret 投入 + WIF 許可の確認後に有効化する
+
+permissions:
+  contents: write
+  id-token: write   # Google Cloud への Workload Identity 連携に必要（コード署名）
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
+jobs:
+  # Secret が 1 つでも欠けていたら、**ここで名前を出して赤で落とす**。
+  # 欠けたまま先へ進むと、失敗するのは 10 分後の jsign ステップで、しかもエラーは
+  # 認証ライブラリの一般的な文言になる（「何が足りないか」がログから読めない）。
+  # ⛔ 「Secret が無いからスキップして緑」にはしない - 配布物が出ていないのに緑は嘘である。
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required secrets are present
+        env:
+          INSTALLER_DEPLOY_KEY: ${{ secrets.INSTALLER_DEPLOY_KEY }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SIGNING_SERVICE_ACCOUNT: ${{ secrets.GCP_SIGNING_SERVICE_ACCOUNT }}
+        run: |
+          missing=()
+          for name in INSTALLER_DEPLOY_KEY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SIGNING_SERVICE_ACCOUNT; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing repository secret(s): ${missing[*]}"
+            echo "投入手番は CTO。値は yamatovision/bluelamp-download と同じものを使う（codesign/README.md 参照）。" >&2
+            exit 1
+          fi
+          echo "required secrets present: INSTALLER_DEPLOY_KEY, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SIGNING_SERVICE_ACCOUNT"
+
+  check:
+    needs: preflight
+    runs-on: ubuntu-latest
+    outputs:
+      sha7: ${{ steps.decide.outputs.sha7 }}
+      build_needed: ${{ steps.decide.outputs.build_needed }}
+    steps:
+      - name: Checkout installer main (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: yamatovision/bluelamp-installer
+          ref: main
+          ssh-key: ${{ secrets.INSTALLER_DEPLOY_KEY }}
+      - name: Decide whether a build is needed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA7=$(git rev-parse --short=7 HEAD)
+          echo "sha7=$SHA7" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch -> build $SHA7"
+          elif gh api "repos/${{ github.repository }}/releases/tags/build-$SHA7" > /dev/null 2>&1; then
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            echo "release build-$SHA7 already exists -> skip"
+          else
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            echo "new commit $SHA7 -> build"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build_needed == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout installer main (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: yamatovision/bluelamp-installer
+          ref: main
+          ssh-key: ${{ secrets.INSTALLER_DEPLOY_KEY }}
+      # -Brand bizboost は bluelamp-installer PR #30 で追加された引数。既定（引数なし）は
+      # BlueLamp のままなので、BlueLamp 側の配布ワークフローは一切影響を受けない。
+      - name: Build BizBoostSetup.exe (Inno Setup)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File build/build.ps1 -Brand bizboost
+
+      # ---- ここからコード署名（GlobalSign OV / 秘密鍵は GCP Cloud KMS の HSM 内・外に出ない） ----
+      # ⚠️ 署名は必ず SHA256SUMS.txt の生成より前に行う。署名するとファイルのハッシュが変わるため。
+      - name: Checkout this repo (証明書チェーンの取得のみ)
+        uses: actions/checkout@v4
+        with:
+          path: _selfrepo
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SIGNING_SERVICE_ACCOUNT }}
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Set up Java (jsign requires Java 11+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Download jsign (pinned + checksum verified)
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/ebourg/jsign/releases/download/7.5/jsign-7.5.jar'
+          $expected = '602A51C3545A6DC4FB99BD2EA7152B26D1345916D0C93DDFBD5936CB735AF91C'
+          Invoke-WebRequest -Uri $url -OutFile jsign.jar
+          $actual = (Get-FileHash jsign.jar -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "jsign.jar checksum mismatch: $actual" }
+      - name: Sign BizBoostSetup.exe (GlobalSign OV / Cloud KMS HSM)
+        shell: pwsh
+        run: |
+          $token = gcloud auth print-access-token
+          if (-not $token) { throw "failed to obtain GCP access token" }
+          java -jar jsign.jar `
+            --storetype GOOGLECLOUD `
+            --keystore projects/yamatovision-blue-lamp/locations/asia-northeast1/keyRings/bluelamp-codesign `
+            --storepass $token `
+            --alias ov-codesign-2026/cryptoKeyVersions/1 `
+            --certfile _selfrepo/codesign/full-chain.pem `
+            --tsaurl http://timestamp.globalsign.com/tsa/r6advanced1 `
+            --tsmode RFC3161 `
+            --alg SHA-256 `
+            --name "BizBoost" `
+            --url "https://github.com/mikoto-co-jp/bizboost-download" `
+            Output/BizBoostSetup.exe
+          if ($LASTEXITCODE -ne 0) { throw "jsign failed" }
+      # 🚨 BizBoost でも署名者は MIKOTO, K.K. である（主君裁定）。ここで MIKOTO を要求するのは
+      #    書き換え忘れではなく、名義がそれ以外に変わったら気づくためのゲートである。
+      - name: Verify signature (発行元が株式会社命であること)
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature Output/BizBoostSetup.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+          if ($sig.Status -ne 'Valid') { throw "signature status is $($sig.Status)" }
+          if ($sig.SignerCertificate.Subject -notmatch 'MIKOTO') { throw "unexpected signer: $($sig.SignerCertificate.Subject)" }
+          if (-not $sig.TimeStamperCertificate) { throw "signature is not timestamped" }
+          "| 項目 | 値 |`n|---|---|`n| 署名 | $($sig.Status) |`n| 発行元 | $($sig.SignerCertificate.Subject) |`n| TSA | $($sig.TimeStamperCertificate.Subject) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      # ---- コード署名ここまで ----
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash Output/BizBoostSetup.exe -Algorithm SHA256).Hash
+          "$hash  BizBoostSetup.exe" | Out-File -Encoding ascii Output/SHA256SUMS.txt
+          Get-Content Output/SHA256SUMS.txt
+      - name: Read AppVersion
+        id: ver
+        shell: pwsh
+        run: |
+          # 参照先は installer/BlueLampSetup.iss のまま。板 #572 でブランド化しても
+          # .iss のパスと ^AppVersion= 行は外部契約として据え置かれている（PR #30 の回帰テストで担保）。
+          $v = (Select-String -Path installer/BlueLampSetup.iss -Pattern '^AppVersion=(.+)$').Matches[0].Groups[1].Value.Trim()
+          "version=$v" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+      - name: Publish release (latest)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "build-${{ needs.check.outputs.sha7 }}"
+          gh release delete $tag --repo ${{ github.repository }} --cleanup-tag --yes 2>$null
+          gh release create $tag Output/BizBoostSetup.exe Output/SHA256SUMS.txt `
+            --repo ${{ github.repository }} `
+            --latest `
+            --title "BizBoostSetup v${{ steps.ver.outputs.version }} ($tag)" `
+            --notes "installer main @ ${{ needs.check.outputs.sha7 }} からの自動ビルド（-Brand bizboost）。SHA256 は SHA256SUMS.txt を参照。"
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
