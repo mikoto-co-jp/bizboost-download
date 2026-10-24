@@ -1,59 +1,61 @@
-# BizBoost ダウンロード（Windows）
+# BizBoost ダウンロード（Windows・Mac）
 
-BizBoost の Windows セットアップ（`BizBoostSetup.exe`）の公式ダウンロード置き場です。
+BizBoost のセットアップ（Windows `BizBoostSetup.exe`・Mac `BizBoostSetup.dmg`）の公式ダウンロード置き場です。
 
 ## ダウンロード（常に最新版）
 
-- **インストーラ本体**: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.exe
+- **Windows**: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.exe
+- **Mac**: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.dmg
 - **SHA256（改ざん確認用）**: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/SHA256SUMS.txt
 
-> ⏳ **まだ Release はありません。** 下の「実走前の宿題」が片付いてから最初のビルドを回します。
+> ⏳ **まだ GA の Release はありません。** 下の「実走前の宿題」が片付き、検証した pre-release を昇格させると上の URL が解決します。
 
 ## 仕組み（運用者向け）
 
-- ビルド元: `yamatovision/bluelamp-installer`（private）の `main`。**BlueLamp と同じ 1 つのコードベース**から
-  `build/build.ps1 -Brand bizboost` でビルドします（板 #572・フォークではありません）
-- `.github/workflows/build-release.yml` が windows ランナー＋Inno Setup でビルドし、
-  GlobalSign OV 証明書で署名し、このリポジトリの Release（tag: `build-<sha7>`）として公開します
-- トリガー: 手動 `gh workflow run build-release -R mikoto-co-jp/bizboost-download`
-  （毎朝の自動リリースは**意図的に無効化中**。理由は下記）
-- 認証: installer リポの read-only deploy key（Secret `INSTALLER_DEPLOY_KEY`）のみ。
-  ソースコードは公開されません（公開されるのはビルド済み exe と SHA256 のみ）
+3 本の workflow は `yamatovision/bluelamp-download` の同名ファイル（と `.github/scripts/**` の判定器・テスト）の**写し**です（板 #572・箱 n=3687）。
+ビルド元は BlueLamp と同じ 1 つのコードベース `yamatovision/bluelamp-installer`（private）の `main` で、フォークではありません。
 
-この workflow は `yamatovision/bluelamp-download` の `build-release.yml` の**写し**です。
-BlueLamp 版との差分は 4 点だけ（ビルド引数・成果物名・jsign の `--name`/`--url`・Secret 事前検査）で、
-**署名まわり（keystore / alias / certfile / TSA / alg）は 1 文字も変えていません**。
+| workflow | 起動 | 作る物 |
+|---|---|---|
+| `release-macos.yml` | 手動 dispatch のみ | `build/build-mac.sh --brand bizboost` → 署名・公証・staple → pre-release `mac-<sha7>`（dmg） |
+| `build-release.yml` | 手動 dispatch（schedule は当面コメントアウト） | `build/build.ps1 -Brand bizboost` → 署名 → `mac-<sha7>` の dmg を取り込み → pre-release `build-<sha7>`（exe・dmg・SUMS の 3 点） |
+| `promote-release.yml` | 手動 dispatch のみ | 検証した `build-<sha7>` を GA（releases/latest）へ昇格。**GA を作る経路はこれ 1 本だけ** |
+
+撃つ順: `gh workflow run release-macos -R mikoto-co-jp/bizboost-download` → `gh workflow run build-release -R mikoto-co-jp/bizboost-download` → 検証 → `gh workflow run promote-release -R mikoto-co-jp/bizboost-download -f tag=build-<sha7>`
+
+BlueLamp 版との差分は次だけです（判定器・#655 の full SHA 固定と assert・#936 の pre-release 既定・dmg の取り込みの型は原本のまま）:
+
+1. ブランドの引数（`-Brand bizboost`／`--brand bizboost`）
+2. 成果物名（`BizBoostSetup.exe`／`BizBoostSetup.dmg`）
+3. jsign の `--name`／`--url`
+4. このリポの名前
+5. Secret の事前検査（各 workflow の `preflight` ジョブ・判定器 `.github/scripts/assert-secrets-present.sh`）
+6. `KEYCHAIN_PASSWORD` を Secret に置かず、`release-macos.yml` の job の中で使い捨ての乱数を作る（一時 keychain ごと job の最後に消える）
+7. `build-release.yml` の `schedule:` を当面コメントアウト
+
+- 認証: installer リポの read-only deploy key（Secret `INSTALLER_DEPLOY_KEY`）のみ。公開されるのはビルド済みの exe・dmg と SHA256 だけです
+- GCP の Workload Identity の provider は `bizboost-download-provider`（このリポの repository_id 一致 かつ `ref == refs/heads/main`）。⇒ **dispatch は main からだけ通ります**（枝から撃つと `google-github-actions/auth` で落ちます）
 
 ## コード署名
 
-`BizBoostSetup.exe` は **GlobalSign OV コードサイニング証明書 `CN=MIKOTO, K.K.`** で署名されます。
+`BizBoostSetup.exe` は **GlobalSign OV コードサイニング証明書 `CN=MIKOTO, K.K.`**、`BizBoostSetup.dmg` は **Developer ID Application: MIKOTO, K.K.** で署名されます。
 
 🚨 **署名者は「株式会社命」であり、BizBoost の提供元表記（株式会社グローバルイノベーションズ）とは異なります。**
 これは意図的な決定です（主君裁定 2026-09-02：GI 名義の証明書は取得しない）。
-Windows の UAC ダイアログと証明書のプロパティには `MIKOTO, K.K.` が表示されます。
 
-- 秘密鍵は **GCP Cloud KMS の HSM 内**にあり、リポジトリにも GitHub Secret にも存在しません。
-  CI は Workload Identity 連携で一時トークンを得て、KMS に署名を依頼するだけです
-- `codesign/full-chain.pem` は署名時に埋め込む証明書チェーン（**公開情報**なので Secret ではありません）。
-  `yamatovision/bluelamp-download` のものと**同一ファイル**です（同じ証明書で署名するため）
-- **署名構成の正本は `yamatovision/bluelamp-download` の `codesign/README.md`**（証明書の有効期限・鍵のパス・
-  更新手順）。ここに写すと 2 つの説明が別々に古くなるので、意図的に写していません
+- Windows の秘密鍵は **GCP Cloud KMS の HSM 内**にあり、リポジトリにも GitHub Secret にも存在しません
+- `codesign/full-chain.pem` は署名時に埋め込む証明書チェーン（**公開情報**）。`yamatovision/bluelamp-download` のものと**同一ファイル**です
+- **署名構成の正本は `yamatovision/bluelamp-download` の `codesign/README.md`**（ここに写すと 2 つの説明が別々に古くなるので写していません）
 
-## 🚧 実走前の宿題（このリポジトリではまだ 1 度もビルドしていません）
+## 🚧 実走前の宿題
 
-| # | やること | 手番 | 状態 |
-|:-:|---|---|---|
-| 1 | Secret 3 本の投入（`INSTALLER_DEPLOY_KEY` / `GCP_WORKLOAD_IDENTITY_PROVIDER` / `GCP_SIGNING_SERVICE_ACCOUNT`）。値は `bluelamp-download` と同じ | CTO | 未 |
-| 2 | **Workload Identity 連携の許可対象にこのリポジトリを追加する** | CTO | 未 |
-| 3 | 手動 dispatch を 1 回グリーンにする | — | 未 |
-| 4 | グリーン後、`build-release.yml` の `schedule:` のコメントアウトを外す | — | 未 |
+| # | やること | 状態 |
+|:-:|---|---|
+| 1 | Secret の投入（`INSTALLER_DEPLOY_KEY`・`GCP_WORKLOAD_IDENTITY_PROVIDER`・`GCP_SIGNING_SERVICE_ACCOUNT`・`APPLE_CERTIFICATE`・`APPLE_CERTIFICATE_PASSWORD`・`APPLE_ID`・`APPLE_PASSWORD`・`APPLE_TEAM_ID`）。`KEYCHAIN_PASSWORD` は置かない | 済（2026-10-24） |
+| 2 | Workload Identity の provider `bizboost-download-provider` を作り、署名 SA に workloadIdentityUser を付ける | 済（2026-10-24） |
+| 3 | installer 側で Mac の build に brand を渡せるようにする（`build/build-mac.sh --brand bizboost`）。⚠️ installer は `ref: main` を引くので、これが installer の main に入るまで Mac 版は建たない | 未 |
+| 4 | main から `release-macos` → `build-release` を 1 回ずつ dispatch して緑にする | 未 |
+| 5 | 実機で検証した `build-<sha7>` を `promote-release` で GA にする | 未 |
+| 6 | 緑になった後、`build-release.yml` の `schedule:` のコメントアウトを外す | 未 |
 
-🚨 **#2 は見落としやすく、Secret を入れただけでは通らない可能性が高い**論点です。
-GitHub Actions の Workload Identity プロバイダは、たいてい
-`assertion.repository == 'yamatovision/bluelamp-download'` のような attribute condition で
-**特定リポジトリに縛られています**。縛られていれば、同じ Secret を入れても
-このリポジトリからの認証は **GCP 側で拒否** されます（症状は `google-github-actions/auth` ステップでの失敗）。
-**未検証**です — このリポジトリからは GCP の設定を読めないため、CTO 手番として残します。
-
-なお workflow は Secret が欠けていると**最初のジョブで欠けている名前を出して赤で落ちます**。
-「Secret が無いのでスキップして緑」にはしません（配布物が出ていないのに緑は嘘なので）。
+Secret が欠けていると、各 workflow の**最初のジョブ（preflight）で欠けている名前を出して赤で落ちます**。「Secret が無いのでスキップして緑」にはしません（配布物が出ていないのに緑は嘘なので）。
