@@ -427,8 +427,8 @@ jobs:
           tag="build-${BL_INSTALLER_SHA7}"
           notes="$RUNNER_TEMP/release-notes.md"
           cat > "$notes" <<NOTES
-          BizBoostSetup.exe: bluelamp-installer @ **${BL_INSTALLER_SHA7}**（full \`${BL_INSTALLER_SHA}\`）からの署名済み自動ビルド（run ${GITHUB_RUN_ID}）。
-          BizBoostSetup.dmg: pre-release \`${BL_MAC_TAG}\` ＝ bluelamp-installer @ **${BL_MAC_SHA7}** から取り込んだ署名・公証・staple 済みビルド。
+          BizBoostSetup.exe: インストーラーのソース @ **${BL_INSTALLER_SHA7}**（full \`${BL_INSTALLER_SHA}\`）からの署名済み自動ビルド（run ${GITHUB_RUN_ID}）。
+          BizBoostSetup.dmg: pre-release \`${BL_MAC_TAG}\` ＝ インストーラーのソース @ **${BL_MAC_SHA7}** から取り込んだ署名・公証・staple 済みビルド。
 
           ⚠️ **exe と dmg は別の installer commit から作られていることがある。**上の 2 行がそれぞれの出所であり、
           ⛔ 片方の sha7 で両方を代表させていない（タグ名 \`build-<sha7>\` が指すのは **exe 側**の commit である）。

@@ -290,7 +290,7 @@ jobs:
           # 生の複数行文字列を書くとインデントが割れる）。
           notes="$RUNNER_TEMP/release-notes.md"
           cat > "$notes" <<NOTES
-          bluelamp-installer main @ ${BL_INSTALLER_SHA} からの署名・公証・staple 済みビルド（板 #529 便B-2a・run ${GITHUB_RUN_ID}）。
+          インストーラーのソース main @ ${BL_INSTALLER_SHA} からの署名・公証・staple 済みビルド（板 #529 便B-2a・run ${GITHUB_RUN_ID}）。
 
           ⚠️ **これは pre-release であって GA ではない。** GA 昇格（\`--latest\` への flip）は主君の号令＋CTO 手番（板 #529 停止予定点②）。
           ⚠️ **恒久 URL \`releases/latest/download/BizBoostSetup.dmg\` はこの状態では解決しない**（installer 側 §M9 は GA 昇格まで未達）。昇格時に CTO が同一タグ 3 アセット（§M12）へ切り替える必要がある。
