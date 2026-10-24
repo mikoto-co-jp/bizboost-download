@@ -71,7 +71,7 @@ jobs:
       - name: GA に昇格する
         run: |
           set -eu
-          before=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || echo '(none)')
+          before=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null) || before='(none)'  # 404 の本文を拾わない（build-release と同じ形）
           echo "BEFORE=$before" >> "$GITHUB_ENV"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
 
