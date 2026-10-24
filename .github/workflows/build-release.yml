@@ -1,71 +1,104 @@
 name: build-release
 # bluelamp-installer(private) の main から BizBoostSetup.exe をビルドし、
 # このリポジトリの Release として公開する。
-# 恒久URL: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.exe
 #
-# 【この workflow の出自】yamatovision/bluelamp-download の build-release.yml の写しである。
-# 1 コードベース 2 ブランド（板 #572）の配布側で、**新しい型を発明していない**。
-# BlueLamp 版との差分は 4 点だけ:
-#   1. ビルドが build/build.ps1 -Brand bizboost（installer 側 PR #30 で追加された引数）
-#   2. 成果物が Output/BizBoostSetup.exe（SHA256SUMS.txt の中身も同じ名前）
-#   3. jsign の --name が BizBoost、--url がこのリポジトリ
-#   4. Secret 事前検査（下記 preflight ジョブ）を足した
-# 変えていない: --keystore / --alias / --certfile / TSA / --alg。
-#   ⇒ **署名名義は MIKOTO, K.K. のまま**（主君裁定 2026-09-02。GI 名義証明書は取らない）。
-#      BizBoost の提供元表記（株式会社グローバルイノベーションズ）と署名者が異なるのは意図的。
+# 【出自】yamatovision/bluelamp-download の build-release.yml（と .github/scripts/**）の写し（板 #572・箱 n=3687）。
+#   1 コードベース 2 ブランドの配布側で、新しい型は発明していない。BlueLamp 版との差分は次だけ:
+#     ① ブランドの引数（build/build.ps1 -Brand bizboost）② 成果物名（BizBoostSetup.exe／.dmg）
+#     ③ jsign の --name／--url ④ このリポの名前 ⑤ Secret 事前検査（preflight ジョブ）
+#     ⑥ schedule を当面コメントアウト（手動 dispatch の初回が緑になってから戻す）
+#   🚨 下の注記に出てくる run 番号・日付・事故は **原本（bluelamp-download）の出来事**である
+#      （名前だけ BizBoost に置き換えて写してある）。この写しでは起きていない。
+#   🔑 署名名義は MIKOTO, K.K. のまま（主君裁定 2026-09-02・GI 名義の証明書は取らない）。
+#      --keystore／--alias／--certfile／TSA／--alg は原本と 1 文字も違わない。
+# 恒久URL: https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.exe
+#          https://github.com/mikoto-co-jp/bizboost-download/releases/latest/download/BizBoostSetup.dmg
 #
 # トリガー:
 #   - workflow_dispatch: 手動リリース（gh workflow run build-release -R mikoto-co-jp/bizboost-download）
-#   - schedule: 🚧 **意図的に無効化してある**（下の cron はコメントアウト）。Secret 投入と
-#     WIF の許可対象追加（README「実走前の宿題」）が済むまで、毎朝自動で赤くなるだけなので出さない。
-#     有効化は「手動 dispatch が 1 回グリーンになってから」= その 1 行を戻すだけ。
+#   - schedule: 毎日 06:17 JST（🪤 実際の発火は 1.5〜2 時間遅れる）に main の更新を検知し、未リリースの commit があれば
+#     **pre-release**（build-<sha7>・Latest にしない）を作る。ただし前回 GA からの変更が文書だけ
+#     （docs/ 配下・リポ直下の *.md）なら warning で skip（板 #936）
+#
+# ━━ GA は promote-release.yml の dispatch でしか作らない（板 #936 系統⑤③・n=1805・CTO68 裁定 A）━━
+#   このワークフローは GA（releases/latest）を 1 バイトも動かさない。検証した sha を
+#   `gh workflow run promote-release -R mikoto-co-jp/bizboost-download -f tag=build-<sha7>` で昇格させる。
+#   🔑 以前は既定が自動 GA で、止めるには人が空の placeholder release（build-<sha7>）を先に置く必要があった
+#      ＝人が覚えていないと安全にならない形。2026-09-18 に誰も置かず、installer のコード 2 commit が
+#      21:26Z に自動で GA（build-1d3c7a0）になった。⇒ 既定を pre-release にして「覚えている必要」を消した。
+#   ⛔ placeholder を置く手順はもう要らない。ガード: .github/scripts/tests/workflow-guards.tests.sh
 # 認証: read-only deploy key（installer リポの閲覧のみ・Secret INSTALLER_DEPLOY_KEY）。PAT 不使用。
 # コード署名: GlobalSign OV コードサイニング証明書（CN=MIKOTO, K.K.）。秘密鍵は GCP Cloud KMS の
 #   HSM（FIPS 140-2 Level 3）内にあり、エクスポート不可。CI は Workload Identity 連携で署名だけを依頼する。
 #   必要な Secret: GCP_WORKLOAD_IDENTITY_PROVIDER / GCP_SIGNING_SERVICE_ACCOUNT（詳細は codesign/README.md）
+#
+# ━━ 板 #655（要件書 §3）で塞いだ 2 つの穴 ━━
+#  1. **出荷物と記録の食い違い**: check と build がそれぞれ独立に `ref: main` を引いていたため、
+#     間に installer へ push が入ると **別 commit の exe が check の sha7 を名乗るタグで出た**
+#     （run 33308043796 の実測: check/mac が de3d812・windows が 0ae7e11。両ジョブとも緑）。
+#     ⇒ check が **フル SHA** を output し、build の checkout をそれに固定する。さらに
+#        「固定したから一致するはず」で済ませず、build の実 HEAD と突き合わせて **実測で assert** する
+#        （.github/scripts/assert-build-sha-matches.sh）。
+#  2. **dmg の消失**: `gh release delete --cleanup-tag` の直後に exe と SUMS の **2 つだけ**を渡して
+#     release を作り直していたため、手作業で GA に載せた BizBoostSetup.dmg と SUMS の dmg 行が
+#     次の実走 1 回で黙って消え、releases/latest/download/BizBoostSetup.dmg が 404 に戻った。
+#     ⇒ dmg を release-macos.yml が出した `mac-<sha7>` pre-release から取り込み、**3 点が揃って
+#        いることを確かめてから**でなければ既存 GA に触らない（`--cleanup-tag` は不可逆）。
+#        揃わないときの正しい振る舞いは「exe だけで作り直す」ではなく **GA を作り直さないこと**。
+#        🚨 **赤で止めるのではない**（PM 裁定 2026-09-07）——`release-macos.yml` は
+#           workflow_dispatch のみで日次と歩調が合わず、赤にすると**日次がほぼ常に赤**になり
+#           「誰も見なくなった赤」が残る。⇒ warning ＋ no-op で終わり、既存 GA は 1 バイトも動かない。
+#           ⛔ この段落は実装と対で直すこと（前の版の「赤で止める」がヘッダにだけ残っていた）。
 
 on:
   workflow_dispatch:
+  # 🚧 当面コメントアウト（箱 n=3687）。手動 dispatch の初回が緑になってから、この 2 行を戻すだけ。
   # schedule:
-  #   - cron: '17 21 * * *'   # 毎日 06:17 JST。Secret 投入 + WIF 許可の確認後に有効化する
+  #   - cron: '17 21 * * *'
 
 permissions:
   contents: write
   id-token: write   # Google Cloud への Workload Identity 連携に必要（コード署名）
+
+env:
+  # 取り込む dmg の鮮度の上限（日）。これを超えたら GA を作り直さない（赤にはしない）。
+  # 🚨 **この数値の正本はここ 1 箇所**（CTO 裁定 2026-09-10・案 A3 で 30 日）。判定器
+  #    .github/scripts/assert-dmg-freshness.sh には埋めていないので、変えるならここだけ直す。
+  BL_MAC_DMG_MAX_AGE_DAYS: '30'
 
 concurrency:
   group: build-release
   cancel-in-progress: false
 
 jobs:
-  # Secret が 1 つでも欠けていたら、**ここで名前を出して赤で落とす**。
-  # 欠けたまま先へ進むと、失敗するのは 10 分後の jsign ステップで、しかもエラーは
-  # 認証ライブラリの一般的な文言になる（「何が足りないか」がログから読めない）。
-  # ⛔ 「Secret が無いからスキップして緑」にはしない - 配布物が出ていないのに緑は嘘である。
+  # Secret が 1 つでも欠けていたら、**ここで名前を出して赤で落とす**（判定は assert-secrets-present.sh）。
+  # ⛔ 「Secret が無いからスキップして緑」にはしない。Mac の 6 点は release-macos.yml の preflight が見る。
   preflight:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout this repo (判定器の取得)
+        uses: actions/checkout@v4
+      - name: 判定器の単体テスト（secret の在不在）
+        run: sh .github/scripts/tests/assert-secrets-present.tests.sh
       - name: Required secrets are present
         env:
           INSTALLER_DEPLOY_KEY: ${{ secrets.INSTALLER_DEPLOY_KEY }}
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_SIGNING_SERVICE_ACCOUNT: ${{ secrets.GCP_SIGNING_SERVICE_ACCOUNT }}
         run: |
-          missing=()
-          for name in INSTALLER_DEPLOY_KEY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SIGNING_SERVICE_ACCOUNT; do
-            [ -n "${!name}" ] || missing+=("$name")
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::missing repository secret(s): ${missing[*]}"
-            echo "投入手番は CTO。値は yamatovision/bluelamp-download と同じものを使う（codesign/README.md 参照）。" >&2
+          if ! reason=$(sh .github/scripts/assert-secrets-present.sh INSTALLER_DEPLOY_KEY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SIGNING_SERVICE_ACCOUNT); then
+            echo "::error::$reason（名前は yamatovision/bluelamp-download と同じ。README「実走前の宿題」）"
             exit 1
           fi
-          echo "required secrets present: INSTALLER_DEPLOY_KEY, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SIGNING_SERVICE_ACCOUNT"
+          echo "$reason"
 
   check:
     needs: preflight
     runs-on: ubuntu-latest
     outputs:
+      # 🚨 sha7 は表示用（タグ名・title）。**同一 commit の判定には使わない**——短縮 SHA の
+      #    一致は同一 commit の証明にならない。build の checkout に渡すのは必ず full の sha。
+      sha: ${{ steps.decide.outputs.sha }}
       sha7: ${{ steps.decide.outputs.sha7 }}
       build_needed: ${{ steps.decide.outputs.build_needed }}
     steps:
@@ -75,13 +108,25 @@ jobs:
           repository: yamatovision/bluelamp-installer
           ref: main
           ssh-key: ${{ secrets.INSTALLER_DEPLOY_KEY }}
+          # 前回 GA の commit との差分を採るため全履歴を取る（docs-only skip・板 #936）
+          fetch-depth: 0
+      # 🚨 installer を先に root へ、このリポを後から _selfrepo へ（build job と同じ順序）。
+      - name: Checkout this repo (判定器の取得)
+        uses: actions/checkout@v4
+        with:
+          path: _selfrepo
+      - name: 判定器の単体テスト（docs-only）
+        run: sh _selfrepo/.github/scripts/tests/is-docs-only.tests.sh
       - name: Decide whether a build is needed
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          SHA=$(git rev-parse HEAD)
           SHA7=$(git rev-parse --short=7 HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "sha7=$SHA7" >> "$GITHUB_OUTPUT"
+          echo "installer main = $SHA"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
             echo "manual dispatch -> build $SHA7"
@@ -89,6 +134,39 @@ jobs:
             echo "build_needed=false" >> "$GITHUB_OUTPUT"
             echo "release build-$SHA7 already exists -> skip"
           else
+            # ━━ docs-only skip（板 #936 系統⑤(b)・大掃除便 2026-09-17）━━
+            # 前回 GA（releases/latest＝build-<sha7>）の commit から今の main までの変更が
+            # 文書だけなら、GA を作り直さない（exe 再署名・GA の一時消失・指紋の変更を docs で起こさない）。
+            # ⇒ これまで人が `build-<sha7>` の placeholder release を前置して止めていた経路を不要にする。
+            # 🚨 判定できないとき（latest が build-* でない・sha7 が解決できない・祖先でない・diff 失敗）は
+            #    **これまでどおりビルドする**（fail-safe: 出荷すべき変更を黙って止めない）。⛔ 赤にしない。
+            # 🚨 schedule だけに効く。workflow_dispatch は上で無条件 build（手動は人の判断を優先）。
+            # 「文書」の定義は判定器 .github/scripts/is-docs-only.sh に置く（⛔ ここに条件を書かない）。
+            latest=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name' 2>/dev/null) || latest=''
+            base=''
+            case "$latest" in
+              build-*) base=$(git rev-parse --verify --quiet "${latest#build-}^{commit}") || base='' ;;
+            esac
+            verdict=''
+            if [ -n "$base" ] && git merge-base --is-ancestor "$base" "$SHA" \
+                && changed=$(git -c core.quotepath=false diff --name-only --no-renames "$base" "$SHA"); then
+              if verdict=$(sh _selfrepo/.github/scripts/is-docs-only.sh "$changed"); then
+                echo "build_needed=false" >> "$GITHUB_OUTPUT"
+                echo "::warning::docs-only skip: 前回 GA ${latest} から ${SHA7} までの変更は文書だけ → GA を作り直さない（${verdict}）"
+                {
+                  printf '### docs-only skip（GA を作り直していない）\n\n'
+                  printf '| 項目 | 値 |\n|---|---|\n'
+                  printf '| 前回 GA | `%s`（`%s`） |\n' "$latest" "$base"
+                  printf '| installer main | `%s` |\n' "$SHA"
+                  printf '| 判定 | %s |\n' "$verdict"
+                  printf '\n変更パス:\n\n```\n%s\n```\n' "$changed"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              echo "docs-only ではない: $verdict"
+            else
+              echo "docs-only を判定できない（latest='${latest}' base='${base}'）→ これまでどおりビルド"
+            fi
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
             echo "new commit $SHA7 -> build"
           fi
@@ -98,24 +176,55 @@ jobs:
     if: needs.check.outputs.build_needed == 'true'
     runs-on: windows-latest
     steps:
-      - name: Checkout installer main (read-only deploy key)
+      # 🚨 installer を先に root へ、このリポを後から _selfrepo へ。
+      #    （root への checkout は作業ディレクトリを掃除するので、順序を入れ替えないこと）
+      # 🚨 `ref: main` ではなく check が確定した **フル SHA** に固定する（要件書 D2-1）。
+      #    installer 側 §M12 条件1 の例外として CTO 裁定済み（5298d66）。
+      - name: Checkout installer at the SHA check decided (read-only deploy key)
         uses: actions/checkout@v4
         with:
           repository: yamatovision/bluelamp-installer
-          ref: main
+          ref: ${{ needs.check.outputs.sha }}
           ssh-key: ${{ secrets.INSTALLER_DEPLOY_KEY }}
-      # -Brand bizboost は bluelamp-installer PR #30 で追加された引数。既定（引数なし）は
-      # BlueLamp のままなので、BlueLamp 側の配布ワークフローは一切影響を受けない。
+
+      - name: Checkout this repo (判定器と証明書チェーンの取得)
+        uses: actions/checkout@v4
+        with:
+          path: _selfrepo
+
+      # 判定器が壊れていたら、署名にも GA にも触る前にここで落とす（fail fast）。
+      - name: 判定器の単体テスト
+        shell: bash
+        run: |
+          sh _selfrepo/.github/scripts/tests/assert-build-sha-matches.tests.sh
+          sh _selfrepo/.github/scripts/tests/assert-release-assets.tests.sh
+          sh _selfrepo/.github/scripts/tests/assert-dmg-freshness.tests.sh
+          sh _selfrepo/.github/scripts/tests/select-mac-release.tests.sh
+          sh _selfrepo/.github/scripts/tests/workflow-guards.tests.sh
+
+      # 「固定したから一致するはず」で済ませない（要件書 D2-2）。タグ・title・notes が
+      # 名乗る SHA は、ここで採った **build の実 HEAD** から作る。
+      - name: 出荷物と記録の SHA が一致することを実測
+        shell: bash
+        run: |
+          sha=$(git rev-parse HEAD)
+          sha7=$(git rev-parse --short=7 HEAD)
+          if ! reason=$(sh _selfrepo/.github/scripts/assert-build-sha-matches.sh "${{ needs.check.outputs.sha }}" "$sha"); then
+            echo "::error::$reason"
+            exit 1
+          fi
+          echo "$reason"
+          {
+            echo "BL_INSTALLER_SHA=$sha"
+            echo "BL_INSTALLER_SHA7=$sha7"
+          } >> "$GITHUB_ENV"
+
       - name: Build BizBoostSetup.exe (Inno Setup)
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File build/build.ps1 -Brand bizboost
 
       # ---- ここからコード署名（GlobalSign OV / 秘密鍵は GCP Cloud KMS の HSM 内・外に出ない） ----
       # ⚠️ 署名は必ず SHA256SUMS.txt の生成より前に行う。署名するとファイルのハッシュが変わるため。
-      - name: Checkout this repo (証明書チェーンの取得のみ)
-        uses: actions/checkout@v4
-        with:
-          path: _selfrepo
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -154,8 +263,6 @@ jobs:
             --url "https://github.com/mikoto-co-jp/bizboost-download" `
             Output/BizBoostSetup.exe
           if ($LASTEXITCODE -ne 0) { throw "jsign failed" }
-      # 🚨 BizBoost でも署名者は MIKOTO, K.K. である（主君裁定）。ここで MIKOTO を要求するのは
-      #    書き換え忘れではなく、名義がそれ以外に変わったら気づくためのゲートである。
       - name: Verify signature (発行元が株式会社命であること)
         shell: pwsh
         run: |
@@ -167,30 +274,243 @@ jobs:
           "| 項目 | 値 |`n|---|---|`n| 署名 | $($sig.Status) |`n| 発行元 | $($sig.SignerCertificate.Subject) |`n| TSA | $($sig.TimeStamperCertificate.Subject) |" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       # ---- コード署名ここまで ----
 
-      - name: Generate SHA256SUMS.txt
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash Output/BizBoostSetup.exe -Algorithm SHA256).Hash
-          "$hash  BizBoostSetup.exe" | Out-File -Encoding ascii Output/SHA256SUMS.txt
-          Get-Content Output/SHA256SUMS.txt
-      - name: Read AppVersion
-        id: ver
-        shell: pwsh
-        run: |
-          # 参照先は installer/BlueLampSetup.iss のまま。板 #572 でブランド化しても
-          # .iss のパスと ^AppVersion= 行は外部契約として据え置かれている（PR #30 の回帰テストで担保）。
-          $v = (Select-String -Path installer/BlueLampSetup.iss -Pattern '^AppVersion=(.+)$').Matches[0].Groups[1].Value.Trim()
-          "version=$v" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
-      - name: Publish release (latest)
-        shell: pwsh
+      # 🚨 dmg はここで **既に署名・公証・staple 済みのもの**を取り込む（要件書 D2-6）。
+      #    再署名も再パッケージもしない。hash は取り込んだファイルから採り直す（D2-5）。
+      #
+      # 🚨 取れなくても **赤にしない**（PM 裁定 2026-09-07）。代わりに「揃わなければ GA を
+      #    作り直さない」へ倒す。⇒ 既存の GA release には 1 バイトも触れずに warning で終わる。
+      #    🔑 これで「dmg が黙って消える」は構造的に起きなくなる——**消す前に揃っていることが
+      #      条件**だからである（`gh release delete --cleanup-tag` は不可逆・fail-safe defaults）。
+      #    ⛔ 「exe だけで release を作り直す」ことはしない。それが消失そのものだった。
+      #    ⚠️ 同一 sha7 の `mac-<sha7>` を必須にはしない。`release-macos.yml` は
+      #      workflow_dispatch のみで日次 GA と歩調が合わず、**日次がほぼ常に赤になる**＝
+      #      誰も見なくなった赤が残る（PM 裁定）。exe と dmg が別 commit でありうることは
+      #      notes に両方の sha7 を別々に書いて明示する（⛔ 片方で両方を代表させない）。
+      - name: mac の pre-release から BizBoostSetup.dmg を取り込む
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "build-${{ needs.check.outputs.sha7 }}"
-          gh release delete $tag --repo ${{ github.repository }} --cleanup-tag --yes 2>$null
-          gh release create $tag Output/BizBoostSetup.exe Output/SHA256SUMS.txt `
-            --repo ${{ github.repository }} `
-            --latest `
-            --title "BizBoostSetup v${{ steps.ver.outputs.version }} ($tag)" `
-            --notes "installer main @ ${{ needs.check.outputs.sha7 }} からの自動ビルド（-Brand bizboost）。SHA256 は SHA256SUMS.txt を参照。"
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          # 🚨 `shell: bash` の既定は `bash --noprofile --norc -eo pipefail` で、ここに書く
+          #    `set -uo pipefail` は **`-e` を消さない**。⇒ 下のコマンド置換が失敗すると
+          #    step が **赤**になり、「dmg が取れなくても赤にしない」（PM 裁定）がこの経路だけ
+          #    通らなくなる。**失敗も明示的に warning ＋ exit 0 へ倒す**こと。
+          #    🔬 実測: bash --noprofile --norc -eo pipefail -c 'set -uo pipefail; x=$(false); echo reached'
+          #            → exit=1 で `reached` は出ない（`set +e` を書かない限り置換の失敗で即死する）。
+          set -uo pipefail
+          echo "BL_ASSETS_READY=0" >> "$GITHUB_ENV"
+          # ⛔ `set +e` で受けないこと（step の残り全部で -e が外れ、GITHUB_ENV への書き込み
+          #    失敗まで無音になる）。**この 1 コマンドだけ** `|| { … exit 0; }` で受ける。
+          # 🚨 経過日数は **gh 同梱の jq（gojq）に計算させる**。⛔ `date -d` を使わないこと——
+          #    この step は windows ランナーの Git Bash で走り、GNU/BSD で `date` の書式が違う。
+          #    `now` と `fromdateiso8601` はどちらの機体でも同じ結果になる。
+          #
+          # 🚨 使うのは **publishedAt**。⛔ `createdAt` を使うな——**GitHub の release の
+          #    `createdAt` は「タグが指す commit の日時」であって公開日時ではない**。
+          #    🔬 2026-09-10 の実配布事故: `mac-abd434b`（当日公開）と `mac-0ae7e11`（9 日前公開）が
+          #       **どちらも createdAt = 2026-08-31T12:22:55Z**（同じ commit を指すタグだから）で、
+          #       並べ替えが判別子にならず **9 日前のほうが GA に載った**。
+          #    ⛔ 経過日数を createdAt から出すと、**1 時間前に作った dmg も「9 日前」になる**
+          #       ＝鮮度ガードが dmg の年齢でなく commit の年齢を測る別物になる。
+          #
+          # 🚨 どれを選ぶかの判断は判定器に置く（テストできない場所に判断を置かない）。
+          #    ここは「候補と経過日数を測って渡す」だけ。⛔ 並び順に意味を持たせない。
+          mac_list=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isPrerelease,publishedAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("mac-")))]
+                  | map("\(.tagName) \((now - (.publishedAt | fromdateiso8601)) / 86400 | floor)")
+                  | join("\n")') || {
+            echo "::warning::mac- の pre-release を一覧できなかった（GitHub API の一時障害等）。dmg を取り込めないので GA を作り直さない（既存 GA はそのまま）"
+            echo "BL_NOT_READY_REASON=mac- の pre-release を一覧できなかった（GitHub API の一時障害等）" >> "$GITHUB_ENV"
+            exit 0
+          }
+          if [ -z "$mac_list" ]; then
+            echo "::warning::mac- で始まる pre-release が 1 つも無い。dmg を取り込めないので GA を作り直さない（既存 GA はそのまま）"
+            echo "BL_NOT_READY_REASON=mac- で始まる pre-release が 1 つも無い（release-macos.yml を先に走らせること）" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "候補:"
+          printf '%s\n' "$mac_list" | sed 's/^/  /'
+          if ! sel=$(sh _selfrepo/.github/scripts/select-mac-release.sh "$mac_list" "$BL_INSTALLER_SHA7"); then
+            echo "::warning::mac- の pre-release を選べなかった: ${sel}。GA を作り直さない（既存 GA はそのまま）"
+            echo "BL_NOT_READY_REASON=mac- の pre-release を選べなかった: ${sel}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          mac_tag=${sel%% *}
+          mac_rest=${sel#* }
+          mac_age=${mac_rest%% *}
+          mac_why=${mac_rest##* }
+          echo "dmg の取り込み元: ${mac_tag}（${mac_age} 日前・選んだ理由 ${mac_why}）"   # 🚨 $var の直後に全角文字を置かない（bash が変数名に取り込む）
+
+          # 🚨 鮮度ガード（CTO 裁定 2026-09-10・案 A3）。release-macos.yml は dispatch 専用で
+          #    日次と歩調が合わないため、**誰も撃たなければ同じ dmg が永遠に「最新」として GA に
+          #    載り続ける**（板 #707 の症状＝人手で載せた 1 本が正解であり続けた状態の再生産）。
+          #    ⇒ 古くなる方向にだけ歯止めを置く。⛔ ここも赤にはしない（no-op へ倒す）。
+          if ! reason=$(sh _selfrepo/.github/scripts/assert-dmg-freshness.sh "$mac_age" "$BL_MAC_DMG_MAX_AGE_DAYS"); then
+            echo "::warning::$reason"
+            echo "BL_NOT_READY_REASON=$reason" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "$reason"
+          if ! gh release download "$mac_tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern BizBoostSetup.dmg --dir Output --clobber; then
+            echo "::warning::$mac_tag から BizBoostSetup.dmg を取得できなかった。GA を作り直さない（既存 GA はそのまま）"
+            exit 0
+          fi
+          if [ ! -s Output/BizBoostSetup.dmg ]; then
+            echo "::warning::$mac_tag から取り込んだ BizBoostSetup.dmg が無いか 0 バイト。GA を作り直さない（既存 GA はそのまま）"
+            exit 0
+          fi
+          {
+            echo "BL_MAC_TAG=$mac_tag"
+            echo "BL_MAC_SHA7=${mac_tag#mac-}"
+            echo "BL_ASSETS_READY=1"
+          } >> "$GITHUB_ENV"
+          # ⚠️ exe と dmg が別の installer commit から作られていること自体は許す（PM 裁定＝
+          #    同一 sha7 必須にすると日次がほぼ常に赤になる）。⛔ ただし**黙って混ぜない**。
+          #    notes には既に両方の sha7 を別々に書いてあるが、ログと summary にも必ず残す。
+          if [ "${mac_tag#mac-}" != "$BL_INSTALLER_SHA7" ]; then
+            echo "::warning::exe と dmg の出所が違う: exe=$BL_INSTALLER_SHA7 / dmg=${mac_tag#mac-}（$mac_age 日前）。notes に両方を明記して出す"
+            printf '### exe と dmg の出所が違う\n\n| 成果物 | installer commit | 備考 |\n|---|---|---|\n| BizBoostSetup.exe | `%s` | この run でビルド |\n| BizBoostSetup.dmg | `%s` | `%s` から取り込み（%s 日前） |\n' \
+              "$BL_INSTALLER_SHA7" "${mac_tag#mac-}" "$mac_tag" "$mac_age" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exe と dmg は同じ installer commit（${BL_INSTALLER_SHA7}）から出ている"
+          fi
+          ls -l Output/BizBoostSetup.dmg
+
+      # exe と dmg の 2 行。どちらの hash も **手元のファイルから採り直す**
+      # （pre-release 側の SHA256SUMS.txt を写さない＝二重情報源にしない・D2-5）。
+      - name: Generate SHA256SUMS.txt (exe と dmg の 2 行)
+        if: env.BL_ASSETS_READY == '1'
+        shell: bash
+        run: |
+          cd Output
+          for f in BizBoostSetup.exe BizBoostSetup.dmg; do
+            [ -s "$f" ] || { echo "::error::Output/$f が無いか 0 バイト"; exit 1; }
+          done
+          : > SHA256SUMS.txt
+          for f in BizBoostSetup.exe BizBoostSetup.dmg; do
+            h=$(sha256sum "$f" | cut -d' ' -f1)
+            printf '%s  %s\n' "$h" "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+
+      - name: Read AppVersion
+        id: ver
+        if: env.BL_ASSETS_READY == '1'
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path installer/BlueLampSetup.iss -Pattern '^AppVersion=(.+)$').Matches[0].Groups[1].Value.Trim()
+          "version=$v" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+
+      # 🚨 `gh release delete --cleanup-tag` は不可逆。**消す前に**3 点が揃っていることを確かめる
+      #    （要件書 D2-4・fail-safe defaults）。ここが赤なら既存 GA は 1 バイトも動かない。
+      - name: 3 アセットが揃っていることを delete の前に確かめる
+        if: env.BL_ASSETS_READY == '1'
+        shell: bash
+        run: |
+          assets=$(cd Output && ls -1 BizBoostSetup.exe BizBoostSetup.dmg SHA256SUMS.txt 2>/dev/null || true)
+          sums=$(cat Output/SHA256SUMS.txt 2>/dev/null || true)
+          if ! reason=$(sh _selfrepo/.github/scripts/assert-release-assets.sh "$assets" "$sums"); then
+            echo "::error::$reason"
+            exit 1
+          fi
+          echo "$reason"
+
+      - name: Publish pre-release（Latest にしない・GA は promote-release.yml でだけ作る）
+        if: env.BL_ASSETS_READY == '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BL_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          tag="build-${BL_INSTALLER_SHA7}"
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<NOTES
+          BizBoostSetup.exe: bluelamp-installer @ **${BL_INSTALLER_SHA7}**（full \`${BL_INSTALLER_SHA}\`）からの署名済み自動ビルド（run ${GITHUB_RUN_ID}）。
+          BizBoostSetup.dmg: pre-release \`${BL_MAC_TAG}\` ＝ bluelamp-installer @ **${BL_MAC_SHA7}** から取り込んだ署名・公証・staple 済みビルド。
+
+          ⚠️ **exe と dmg は別の installer commit から作られていることがある。**上の 2 行がそれぞれの出所であり、
+          ⛔ 片方の sha7 で両方を代表させていない（タグ名 \`build-<sha7>\` が指すのは **exe 側**の commit である）。
+          SHA256 は SHA256SUMS.txt（exe と dmg の 2 行）を参照。hash はこの release に載っているファイルから採り直したもの。
+          NOTES
+          # 🚨 同名タグが既に **GA** なら触らない（撃ち直しで GA を消さない）。GA の作り直しは
+          #    promote-release.yml の経路でだけ行う。pre-release なら撃ち直しに備えて作り直す。
+          existing=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease' 2>/dev/null || echo none)
+          if [ "$existing" = "false" ]; then
+            echo "::warning::$tag は既に GA。このワークフローは GA に触らないので作り直さない"
+            printf '### %s は既に GA のため作り直していない\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' > "$RUNNER_TEMP/latest-before.txt" 2>/dev/null || echo '(none)' > "$RUNNER_TEMP/latest-before.txt"
+          if [ "$existing" = "true" ]; then
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+          gh release create "$tag" \
+            Output/BizBoostSetup.exe Output/BizBoostSetup.dmg Output/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --latest=false \
+            --title "BizBoostSetup v${BL_VERSION} ($tag)" \
+            --notes-file "$notes"
+          echo "BL_PUBLISHED=1" >> "$GITHUB_ENV"
+
+      # 「出したつもり」を潰す。GitHub 側に実際に何が載ったかで測る（要件書 S2 の ✅）。
+      - name: 出した pre-release に 3 アセットが載り、GA が動いていないことを実測
+        if: env.BL_PUBLISHED == '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${BL_INSTALLER_SHA7}"
+          names=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          sums=$(cat Output/SHA256SUMS.txt)
+          if ! reason=$(sh _selfrepo/.github/scripts/assert-release-assets.sh "$names" "$sums"); then
+            echo "::error::$reason"
+            exit 1
+          fi
+          echo "$reason"
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || echo '(none)')
+          before=$(cat "$RUNNER_TEMP/latest-before.txt" 2>/dev/null || echo '(unknown)')
+          pre=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')
+          {
+            printf '### pre-release の発行結果（GA は promote-release.yml で昇格させる）\n\n| 項目 | 値 |\n|---|---|\n'
+            printf '| タグ | `%s` |\n' "$tag"
+            printf '| installer SHA（exe の出所） | `%s` |\n' "$BL_INSTALLER_SHA"
+            printf '| dmg の取り込み元 | `%s` |\n' "$BL_MAC_TAG"
+            printf '| アセット | %s |\n' "$(printf '%s' "$names" | tr '\n' ' ')"
+            printf '| isPrerelease | `%s` |\n' "$pre"
+            printf '| releases/latest（前 → 後・変わってはいけない） | `%s` → `%s` |\n' "$before" "$latest"
+            printf '\n昇格: `gh workflow run promote-release -R %s -f tag=%s`（検証してから）\n' "$GITHUB_REPOSITORY" "$tag"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$pre" != "true" ]; then
+            echo "::error::$tag が pre-release になっていない（isPrerelease=$pre）"
+            exit 1
+          fi
+          if [ "$latest" = "$tag" ] || [ "$latest" != "$before" ]; then
+            echo "::error::releases/latest が動いた（'$before' → '$latest'）。このワークフローは GA に触らない"
+            exit 1
+          fi
+
+      # 🚨 「何も起きなかった」を無音で終わらせない（潔癖性）。揃わなかったことと、
+      #    既存 GA に触れていないことを必ず残す。⛔ ここで release を作り直さない。
+      - name: 3 アセットが揃わなかったので GA を作り直していない
+        if: env.BL_ASSETS_READY != '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null) || latest='(none)'
+          {
+            printf '### GA を作り直していない\n\n'
+            printf 'BizBoostSetup.dmg を取り込めなかったため、`gh release delete --cleanup-tag` も\n'
+            printf '`gh release create` も撃っていない。**既存の GA release は 1 バイトも動いていない。**\n\n'
+            printf '| 項目 | 値 |\n|---|---|\n'
+            printf '| 揃わなかった理由 | %s |\n' "${BL_NOT_READY_REASON:-（理由が記録されていない＝取り込み step の想定外の経路）}"
+            printf '| exe をビルドした installer SHA | `%s` |\n' "$BL_INSTALLER_SHA"
+            printf '| releases/latest（変えていない） | `%s` |\n' "$latest"
+            printf '\n⛔ 「exe だけで作り直す」ことはしない（それが dmg 消失そのものだった）。\n'
+            printf 'dmg を出すには `release-macos.yml` を先に走らせること。\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::3 アセットが揃わなかったので GA を作り直していない（releases/latest = $latest のまま）"
