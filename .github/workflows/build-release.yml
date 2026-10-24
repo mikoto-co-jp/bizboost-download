@@ -470,7 +470,7 @@ jobs:
             exit 1
           fi
           echo "$reason"
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || echo '(none)')
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null) || latest='(none)'  # GA が無いと gh は 404 の本文を stdout に出す＝`|| echo` の形だと本文と (none) が連なる（n=3687 の初回で実踏）
           before=$(cat "$RUNNER_TEMP/latest-before.txt" 2>/dev/null || echo '(unknown)')
           pre=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')
           {
